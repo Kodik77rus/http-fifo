@@ -1,18 +1,14 @@
 package main
 
 import (
-	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"sync"
-)
-
-var (
-	errNotInitializedQueue = errors.New("not initialized queue")
-	errEmptyQueue          = errors.New("empty queue")
 )
 
 func main() {
@@ -21,15 +17,13 @@ func main() {
 	flag.Parse()
 
 	httpFifo := newHttpFifo()
-	mux := http.NewServeMux()
 
-	initQueueHandler(httpFifo, mux)
+	server := http.Server{
+		Addr:        fmt.Sprint(":", *port),
+		IdleTimeout: 5 * time.Minute,
+	}
 
-	log.Fatal(http.ListenAndServe(":"+*port, mux))
-}
-
-func initQueueHandler(fifo *httpFifo, mux *http.ServeMux) {
-	handler := func(w http.ResponseWriter, r *http.Request) {
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		queueName := strings.TrimLeft(r.URL.Path, "/")
 		queryParam := r.URL.Query()
 
@@ -39,58 +33,50 @@ func initQueueHandler(fifo *httpFifo, mux *http.ServeMux) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			fifo.add(queueName, queryParam.Get("v"))
+			httpFifo.push(queueName, queryParam.Get("v"))
 		case http.MethodGet:
-			elem, err := fifo.get(queueName)
-			if err != nil {
-				w.WriteHeader(http.StatusNotFound)
-				return
-			}
+			elem := httpFifo.get(queueName)
 			w.Write([]byte(elem))
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
-	}
-	mux.HandleFunc("/", handler)
+	})
+
+	log.Fatal(server.ListenAndServe())
 }
 
 type httpFifo struct {
-	storage map[string][]*string
-	mutex   sync.Mutex
+	queue map[string][]*string
+	mutex sync.Mutex
 }
 
 func newHttpFifo() *httpFifo {
 	return &httpFifo{
-		storage: make(map[string][]*string),
+		queue: make(map[string][]*string),
 	}
 }
 
-func (h *httpFifo) add(queueName, val string) {
+func (h *httpFifo) get(queueName string) string {
+	for {
+		_, ok := h.queue[queueName]
+		if ok {
+			h.mutex.Lock()
+			defer h.mutex.Unlock()
+
+			firstElem := h.queue[queueName][0]
+			h.queue[queueName] = h.queue[queueName][1:]
+			return *firstElem
+		}
+	}
+}
+
+func (h *httpFifo) push(queueName string, val string) {
 	h.mutex.Lock()
 	defer h.mutex.Unlock()
 
-	slice, found := h.storage[queueName]
-	if !found {
-		newQueue := make([]*string, 0, 10)
-		newQueue = append(newQueue, &val)
-		h.storage[queueName] = newQueue
+	if _, ok := h.queue[queueName]; !ok {
+		h.queue[queueName] = []*string{&val}
 		return
 	}
-	h.storage[queueName] = append(slice, &val)
-}
-
-func (h *httpFifo) get(queueName string) (string, error) {
-	h.mutex.Lock()
-	defer h.mutex.Unlock()
-
-	slice, found := h.storage[queueName]
-	if !found {
-		return "", errNotInitializedQueue
-	}
-	if len(slice) == 0 {
-		return "", errEmptyQueue
-	}
-	firstElem := *slice[0]
-	h.storage[queueName] = slice[1:]
-	return firstElem, nil
+	h.queue[queueName] = append(h.queue[queueName], &val)
 }
