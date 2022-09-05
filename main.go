@@ -16,7 +16,10 @@ func main() {
 	flag.Parse()
 
 	broker := &queueBroker{
-		storage: make(map[string][]chan string),
+		storage: make(map[string][]*string),
+		eventListener: &eventListener{
+			listeners: make(map[string][]chan *string),
+		},
 	}
 
 	server := http.Server{
@@ -34,7 +37,7 @@ func main() {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
-				broker.sendToListeners(queueName, queryParam.Get("v"))
+				broker.add(queueName, queryParam.Get("v"))
 			case http.MethodGet:
 				if queryParam.Has("timeout") {
 					sec, err := time.ParseDuration(queryParam.Get("timeout") + "s")
@@ -52,8 +55,7 @@ func main() {
 					w.Write([]byte(*elem))
 					return
 				}
-
-				w.Write([]byte(<-broker.get(queueName)))
+				w.Write([]byte(*<-broker.get(queueName)))
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
 			}
@@ -63,70 +65,84 @@ func main() {
 }
 
 type queueBroker struct {
-	storage map[string][]chan string
-	mutex   sync.Mutex
+	storage       map[string][]*string
+	eventListener *eventListener
+	mutex         sync.Mutex
 }
 
-func (q *queueBroker) sendToListeners(queueName string, val string) {
+type eventListener struct {
+	listeners map[string][]chan *string
+}
+
+func (q *queueBroker) add(queueName string, val string) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
+
+	if q.eventListener.emit(queueName, val) {
+		return
+	}
 
 	if chanSlice, ok := q.storage[queueName]; ok {
-		if len(chanSlice) > 0 {
-			for _, ch := range chanSlice {
-				if len(ch) == 0 {
-					ch <- val
-					close(ch)
-					return
-				}
-			}
-		}
-		q.storage[queueName] = append(chanSlice, makeAndFillStringChan(val))
+		q.storage[queueName] = append(chanSlice, &val)
 	}
-	q.storage[queueName] = []chan string{makeAndFillStringChan(val)}
+	q.storage[queueName] = []*string{&val}
 }
 
-func (q *queueBroker) get(queueName string) <-chan string {
+func (q *queueBroker) get(queueName string) <-chan *string {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
+
+	ch := make(chan *string, 1)
 
 	if slice, ok := q.storage[queueName]; ok {
 		if len(slice) > 0 {
-			ch := q.storage[queueName][0]
-			if len(ch) == 0 {
-				ch := make(chan string, 1)
-				q.storage[queueName] = append(q.storage[queueName], ch)
-				return ch
-			}
-
+			ch <- q.storage[queueName][0]
+			close(ch)
 			q.storage[queueName] = slice[1:]
 			return ch
 		}
-
-		ch := make(chan string, 1)
-		q.storage[queueName] = append(q.storage[queueName], ch)
-		return ch
 	}
 
-	ch := make(chan string, 1)
-	q.storage[queueName] = []chan string{ch}
+	q.eventListener.addListener(queueName, ch)
 	return ch
+}
+
+func (e *eventListener) addListener(event string, ch chan *string) {
+	if listeners, ok := e.listeners[event]; ok {
+		e.listeners[event] = append(listeners, ch)
+		return
+	}
+	e.listeners[event] = []chan *string{ch}
+}
+
+func (e *eventListener) emit(event string, val string) bool {
+	if chans, ok := e.listeners[event]; ok {
+		if len(chans) > 0 {
+			go func(ch chan *string) {
+				ch <- &val
+				close(ch)
+			}(chans[0])
+
+			e.listeners[event] = chans[1:]
+			return true
+		}
+	}
+	return false
 }
 
 func getWithTimeout(
 	queueName string,
 	interval time.Duration,
-	fn func(queueName string) <-chan string,
+	fn func(queueName string) <-chan *string,
 ) <-chan *string {
 	ch := make(chan *string)
 
 	go func() {
 		defer close(ch)
-
 		for {
 			select {
 			case elem := <-fn(queueName):
-				ch <- &elem
+				ch <- elem
 				return
 			case <-time.After(interval):
 				ch <- nil
@@ -134,12 +150,6 @@ func getWithTimeout(
 			}
 		}
 	}()
-	return ch
-}
 
-func makeAndFillStringChan(val string) chan string {
-	ch := make(chan string, 1)
-	ch <- val
-	close(ch)
 	return ch
 }
