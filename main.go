@@ -37,6 +37,7 @@ func main() {
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
+
 				broker.add(queueName, queryParam.Get("v"))
 			case http.MethodGet:
 				if queryParam.Has("timeout") {
@@ -55,6 +56,7 @@ func main() {
 					w.Write([]byte(*elem))
 					return
 				}
+
 				w.Write([]byte(*<-broker.get(queueName)))
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)
@@ -85,6 +87,7 @@ func (q *queueBroker) add(queueName string, val string) {
 	if chanSlice, ok := q.storage[queueName]; ok {
 		q.storage[queueName] = append(chanSlice, &val)
 	}
+
 	q.storage[queueName] = []*string{&val}
 }
 
