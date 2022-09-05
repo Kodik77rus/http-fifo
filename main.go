@@ -115,6 +115,7 @@ func (e *eventListener) addListener(event string, ch chan *string) {
 		e.listeners[event] = append(listeners, ch)
 		return
 	}
+
 	e.listeners[event] = []chan *string{ch}
 }
 
