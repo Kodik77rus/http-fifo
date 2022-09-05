@@ -130,6 +130,7 @@ func (e *eventListener) emit(event string, val string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
